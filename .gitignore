@@ -1,0 +1,10 @@
+# Ignore Python virtual environment
+
+jarvis-env/
+
+# Ignore Python cache file
+s
+__pycache__/
+*.pyc
+*.pyo
+
