@@ -6,6 +6,7 @@ import struct
 import speech_recognition as sr
 import requests
 import pyttsx3  # Text-to-Speech
+import subprocess  # For Safari opening
 from dotenv import load_dotenv
 from serpapi import GoogleSearch  # Google Search API for real-time data
 
@@ -37,8 +38,6 @@ def speak(text):
     engine = pyttsx3.init()
     engine.setProperty('rate', 165)  # Slightly faster speech
     engine.setProperty('volume', 1.2)  # Increase volume for clarity
-
-    # Set to Daniel's British English Voice
     engine.setProperty('voice', "com.apple.voice.compact.en-GB.Daniel")
 
     engine.say(text)
@@ -52,6 +51,9 @@ porcupine = pvporcupine.create(
 
 # Initialize Speech Recognizer
 recognizer = sr.Recognizer()
+# Give more time before cutting off:
+recognizer.pause_threshold = 1.5  # Increase the silence threshold
+recognizer.dynamic_energy_threshold = True  # Enable dynamic energy adjustment
 
 # Initialize PyAudio for wake-word detection
 pa = pyaudio.PyAudio()
@@ -68,8 +70,10 @@ def chat_with_gpt(prompt):
     try:
         response = client.chat.completions.create(
             model="gpt-4",
-            messages=[{"role": "system", "content": "You are Jarvis, a helpful AI assistant."},
-                      {"role": "user", "content": prompt}]
+            messages=[
+                {"role": "system", "content": "You are Jarvis, a helpful AI assistant."},
+                {"role": "user", "content": prompt}
+            ]
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -88,7 +92,6 @@ def search_google(query):
     try:
         search = GoogleSearch(params)
         results = search.get_dict()
-
         if "organic_results" in results:
             first_result = results["organic_results"][0]["snippet"]
             return first_result
@@ -103,8 +106,9 @@ def recognize_speech():
     """Capture user voice input and convert to text using SpeechRecognition."""
     with sr.Microphone() as source:
         print("🎤 Listening for a command...")
-        recognizer.adjust_for_ambient_noise(source)
-        audio = recognizer.listen(source)
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        # Give up to 10 seconds of speech before timing out
+        audio = recognizer.listen(source, phrase_time_limit=10)
 
     try:
         command = recognizer.recognize_google(audio).lower()
@@ -128,32 +132,54 @@ def detect_wake_word():
         keyword_index = porcupine.process(pcm_unpacked)
         if keyword_index >= 0:
             print("\n✅ Wake word detected! JARVIS is ready.")
-            
-            # Greet with "Hello, Creator"
             speak("Hello, Creator.")
-            
             process_conversation()
 
 def process_conversation():
     """Processes multiple user commands after wake word detection."""
     while True:
         user_input = recognize_speech()
-
         if user_input:
             if user_input in ["exit", "quit", "goodbye", "shut down"]:
                 print("👋 JARVIS: Goodbye, Creator.")
-                speak("Goodbye, Creator.")  # JARVIS will now say goodbye
+                speak("Goodbye, Creator.")
                 cleanup()
                 break
 
+            # "open X in safari" => X.com
+            if "open" in user_input and "in safari" in user_input:
+                domain = user_input.replace("open", "").replace("in safari", "").strip()
+                if not domain.endswith(".com"):
+                    domain += ".com"
+                safari_url = f"https://{domain}"
+                subprocess.run(["open", "-a", "Safari", safari_url])
+                speak(f"Opening {domain}.")
+                continue
+
+            # "open X" => opens Mac app named X
+            if user_input.startswith("open "):
+                app_name = user_input.replace("open ", "").strip()
+                subprocess.run(["open", "-a", app_name])
+                speak(f"Opening {app_name}.")
+                continue
+
+            # "search X" => google search in safari
+            if user_input.startswith("search "):
+                search_query = user_input.replace("search ", "").strip()
+                google_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
+                subprocess.run(["open", "-a", "Safari", google_url])
+                speak(f"Searching for {search_query}.")
+                continue
+
             # Check if the query requires real-time search
             if any(keyword in user_input for keyword in ["news", "update", "latest", "who", "what", "where", "how"]):
-                response = search_google(user_input)  # Fetch live data
+                response = search_google(user_input)
             else:
-                response = chat_with_gpt(user_input)  # Use AI for general reasoning
+                # Otherwise, normal GPT query
+                response = chat_with_gpt(user_input)
 
             print(f"🤖 JARVIS: {response}")
-            speak(response)  # JARVIS will now speak the response
+            speak(response)
 
 def cleanup():
     """Properly closes all audio resources to prevent crashes."""
