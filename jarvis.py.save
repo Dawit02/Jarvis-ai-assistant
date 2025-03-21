@@ -1,0 +1,85 @@
+
+
+if not OPENAI_API_KEY
+    raise ValueError"Missing OpenAI API Key! Please set OPENAI_API_KEY in yoursing Porcupine Access Key! Please set PORCUPINE_ACCESS_KEY in your .env file.")
+
+# ✅ FIXED: Properly initialize the OpenAI client
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Initialize Porcupine for wake word detection
+porcupine = pvporcupine.create(
+    access_key=PORCUPINE_ACCESS_KEY,
+    keyword_paths=["/Users/dawitk/Documents/jarvis-ai-assistant/jarvis_mac.ppn"]  # Updat)
+
+def chat_with_gpt(prompt):
+    """Send a message to GPT-4 and return the response."""
+    try:
+        response = client.chat.completions.create(  # ✅ FIXED: Using client correctly
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are Jarvis, a helpful AI assistant."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error communicating with GPT: {e}")
+        return "I'm sorry, I couldn't process that request."
+
+def recognize_speech():
+    """Capture user voice input and convert to text using SpeechRecognition."""
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening for a command...")
+        recognizer.adjust_for_ambient_noise(source)
+        audio = recognizer.listen(source)
+
+    try:
+        return recognizer.recognize_google(audio)
+    except sr.UnknownValueError:
+        print("Sorry, I couldn't understand that.")
+        return None
+    except sr.RequestError as e:
+        print(f"Could not request results; {e}")
+        return None
+
+def detect_wake_word():
+    """Listen for the wake word 'Hey JARVIS'."""
+    pa = pyaudio.PyAudio()
+    audio_stream = pa.open(
+        rate=porcupine.sample_rate,
+        channels=1,
+        format=pyaudio.paInt16,
+        input=True,
+        frames_per_buffer=512  # ✅ FIXED: Ensure frame length matches Porcupine
+    )
+
+    print("JARVIS is listening for the wake word...")
+    while True:
+        pcm = audio_stream.read(512, exception_on_overflow=False)
+        pcm_unpacked = struct.unpack_from("h" * porcupine.frame_length, pcm)
+
+        keyword_index = porcupine.process(pcm_unpacked)
+        if keyword_index >= 0:
+            print("\nWake word detected! JARVIS is ready.")
+            print("Yes, how can I help?")
+            user_input = recognize_speech()
+
+            if user_input:
+                if user_input.lower() in ["exit", "quit"]:
+                    print("Goodbye!")
+                    break
+
+                response = chat_with_gpt(user_input)
+                if response:
+                    print("JARVIS:", response)
+
+    # Cleanup
+    audio_stream.close()
+    pa.terminate()
+    porcupine.delete()
+
+# Run the assistant
+if __name__ == "__main__":
+    detect_wake_word()
+
