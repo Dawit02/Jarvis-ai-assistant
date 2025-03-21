@@ -5,8 +5,9 @@ import pyaudio
 import struct
 import speech_recognition as sr
 import requests
+import pyttsx3  # Text-to-Speech
 from dotenv import load_dotenv
-from serpapi import GoogleSearch  # SerpAPI for real-time Google search
+from serpapi import GoogleSearch  # Google Search API for real-time data
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,24 @@ if not SERPAPI_KEY:
 
 # Initialize OpenAI client
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Initialize Text-to-Speech Engine
+engine = pyttsx3.init()
+engine.setProperty('rate', 160)  # Adjust speed of speech
+engine.setProperty('volume', 1.0)  # Set volume level
+
+# Set JARVIS voice to Daniel (British English)
+def speak(text):
+    """Make JARVIS speak using a British male AI voice."""
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 165)  # Slightly faster speech
+    engine.setProperty('volume', 1.2)  # Increase volume for clarity
+
+    # Set to Daniel's British English Voice
+    engine.setProperty('voice', "com.apple.voice.compact.en-GB.Daniel")
+
+    engine.say(text)
+    engine.runAndWait()
 
 # Initialize Porcupine for wake word detection
 porcupine = pvporcupine.create(
@@ -109,6 +128,10 @@ def detect_wake_word():
         keyword_index = porcupine.process(pcm_unpacked)
         if keyword_index >= 0:
             print("\n✅ Wake word detected! JARVIS is ready.")
+            
+            # Greet with "Hello, Creator"
+            speak("Hello, Creator.")
+            
             process_conversation()
 
 def process_conversation():
@@ -118,7 +141,8 @@ def process_conversation():
 
         if user_input:
             if user_input in ["exit", "quit", "goodbye", "shut down"]:
-                print("👋 JARVIS: Goodbye!")
+                print("👋 JARVIS: Goodbye, Creator.")
+                speak("Goodbye, Creator.")  # JARVIS will now say goodbye
                 cleanup()
                 break
 
@@ -128,7 +152,8 @@ def process_conversation():
             else:
                 response = chat_with_gpt(user_input)  # Use AI for general reasoning
 
-            print(f"🤖 JARVIS: {response}")  
+            print(f"🤖 JARVIS: {response}")
+            speak(response)  # JARVIS will now speak the response
 
 def cleanup():
     """Properly closes all audio resources to prevent crashes."""
