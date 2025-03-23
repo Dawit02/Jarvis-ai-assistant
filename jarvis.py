@@ -9,8 +9,11 @@ import pyttsx3
 import subprocess
 from dotenv import load_dotenv
 from serpapi import GoogleSearch
-import dateparser  # For natural date/time parsing
+import dateparser
 import re
+import json
+import time
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -26,14 +29,26 @@ if not SERPAPI_KEY:
     raise ValueError("❌ Missing SerpAPI Key! Please set SERPAPI_KEY in your .env file.")
 
 # Initialize OpenAI client
+import openai
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 engine = pyttsx3.init()
 engine.setProperty('rate', 160)
 engine.setProperty('volume', 1.0)
 
+#############################
+# Global states
+#############################
+muted = False          # If True, Jarvis won't listen or speak
+last_button = None     # To avoid repeated triggers
+stop_flag = False      # If True, we forcibly stop speech mid-sentence
+
 def speak(text):
     """Speak text in a British male AI voice."""
+    global muted
+    if muted:
+        print(f"(Muted) Would have spoken: {text}")
+        return
     engine = pyttsx3.init()
     engine.setProperty('rate', 165)
     engine.setProperty('volume', 1.2)
@@ -45,14 +60,6 @@ def speak(text):
 # AppleScript to Query Contacts
 #############################
 def lookup_contact_in_mac_contacts(name: str):
-    """
-    Try to find a person in the macOS Contacts whose name contains 'name' (case-insensitive).
-    If found, return the first phone number of the first matched person. Otherwise return None.
-    """
-    # AppleScript to find a contact by partial name
-    # and return the *value of phone 1* from the first match
-    # If none found, we return "NOT FOUND"
-    # This is minimal logic—if multiple contacts match, it just picks the first.
     applescript = f'''
     tell application "Contacts"
         set matches to every person whose name contains "{name}"
@@ -68,11 +75,9 @@ def lookup_contact_in_mac_contacts(name: str):
     phone_str = result.stdout.strip()
     if phone_str == "NOT FOUND" or phone_str == "":
         return None
-    # phone_str might be e.g. "(303) 333-1111" or "303.333.1111"
     return phone_str
 
 def speak_phone_number_digits(number_str: str):
-    """Read out each digit with spaces, e.g. '3033331111' => '3 0 3 3 3 3 1 1 1 1'."""
     spaced = " ".join(number_str)
     speak(f"The phone number is {spaced}.")
 
@@ -125,10 +130,6 @@ def send_imessage(contact_or_number, message_body):
     subprocess.run(["osascript", "-e", applescript])
 
 def facetime_call(contact_or_number):
-    """
-    Attempts to start a FaceTime call. 
-    Launch FaceTime, type the number, press return.
-    """
     applescript = f'''
     tell application "FaceTime"
         activate
@@ -177,10 +178,52 @@ def add_calendar_event(event_name, start_date, end_date):
 # dateparser
 #############################
 def parse_natural_datetime(user_text):
+    import dateparser
     dt = dateparser.parse(user_text, languages=["en"])
     if not dt:
         return None
     return dt.strftime("%B %d, %Y at %I:%M %p")
+
+#############################
+# Hardware Data Integration
+#############################
+def get_hardware_data():
+    """Reads and returns the hardware data from hardware_data.json."""
+    try:
+        with open("hardware_data.json", "r") as f:
+            data = json.load(f)
+        return data
+    except Exception as e:
+        print("Error reading hardware_data.json:", e)
+        return None
+
+def answer_temperature_query():
+    data = get_hardware_data()
+    if data and data.get("dht"):
+        try:
+            dht_str = data["dht"]  # e.g. "DHT:T:75F, H:40%"
+            parts = dht_str[4:].split(',')
+            temp_part = parts[0].strip()  # e.g., "T:75F"
+            temp_str = temp_part.replace("T:", "").replace("F", "").strip()
+            return f"The temperature in your room is {temp_str}°F."
+        except Exception as e:
+            print("Error parsing DHT data:", e)
+            return "I'm sorry, I couldn't retrieve the temperature."
+    return "I'm sorry, temperature data is not available right now."
+
+def answer_humidity_query():
+    data = get_hardware_data()
+    if data and data.get("dht"):
+        try:
+            dht_str = data["dht"]
+            parts = dht_str[4:].split(',')
+            hum_part = parts[1].strip()  # e.g., "H:40%"
+            hum_str = hum_part.replace("H:", "").replace("%", "").strip()
+            return f"The humidity in your room is {hum_str}%."
+        except Exception as e:
+            print("Error parsing humidity data:", e)
+            return "I'm sorry, I couldn't retrieve the humidity."
+    return "I'm sorry, humidity data is not available right now."
 
 #############################
 # Speech Recognition
@@ -190,7 +233,10 @@ recognizer.pause_threshold = 1.5
 recognizer.dynamic_energy_threshold = True
 
 def recognize_speech(phrase_time=30):
-    """Capture user voice input with up to phrase_time seconds."""
+    global muted
+    if muted:
+        print("(Muted) Not listening.")
+        return None
     with sr.Microphone() as source:
         print("🎤 Listening for a command...")
         recognizer.adjust_for_ambient_noise(source, duration=1)
@@ -221,8 +267,9 @@ def chat_with_gpt(prompt):
         return "I'm sorry, I couldn't process that request."
 
 def search_google(query):
-    params = {"q": query, "hl": "en", "gl": "us", "api_key": SERPAPI_KEY}
+    params = {"q": query, "hl": "en", "gl": "us", "api_key": os.getenv("SERPAPI_KEY")}
     try:
+        from serpapi import GoogleSearch
         gs = GoogleSearch(params)
         results = gs.get_dict()
         if "organic_results" in results:
@@ -325,26 +372,12 @@ audio_stream = pa.open(
 # Combined logic for messages/calls
 ###################################
 def parse_contact_or_number(user_command: str):
-    """
-    1) Extract the name from user_command, e.g. 'message John'
-    2) Try to find that in the Mac Contacts. If found => return phone from contact.
-    3) Otherwise, treat as phone => remove dashes/spaces => returns digits.
-    """
-    # e.g. 'message john' => we remove 'message' => 'john'
-    # e.g. 'text 303-333-1111' => we remove 'text' => '303-333-1111'
-    # e.g. 'call dad' => remove 'call' => 'dad'
     pattern = r"(send message to|message|text|call|facetime|to)\s*"
     cleaned = re.sub(pattern, "", user_command, flags=re.IGNORECASE).strip()
-
-    # 1) See if cleaned is in Mac Contacts
     result = lookup_contact_in_mac_contacts(cleaned)
     if result:
-        # e.g. '303-333-1111'
-        # Remove non digits
         phone = re.sub(r"\D", "", result)
         return phone if phone else None
-
-    # 2) If not found, assume user gave a phone number. remove non digits
     phone_number = re.sub(r"\D", "", cleaned)
     if phone_number:
         return phone_number
@@ -356,24 +389,76 @@ def speak_phone_number_digits(number_str: str):
     speak(f"The phone number is {spaced}.")
 
 ###################################
+# BACKGROUND THREAD: Watch hardware_data.json for button events
+###################################
+def watch_hardware_data():
+    global muted, stop_flag, last_button
+    while True:
+        data = get_hardware_data()
+        if data and data.get("button"):
+            button_val = data["button"]
+            if button_val != last_button:
+                last_button = button_val
+                if button_val == "BTN:STOP":
+                    print("🛑 Physical Stop Button pressed.")
+                    stop_flag = True
+                elif button_val == "BTN:MUTE":
+                    print("🔇 Physical Mute Button pressed.")
+                    muted = True
+                elif button_val == "BTN:DEBUG":
+                    print("⚙️ Physical Debug Button pressed.")
+                    # Add your debug mode toggles here if needed
+        time.sleep(0.5)
+
+###################################
 # MAIN PROCESS
 ###################################
 def detect_wake_word():
+    global stop_flag
     print("🔊 JARVIS is listening for the wake word...")
     while True:
+        # If user pressed STOP, forcibly stop any speech
+        if stop_flag:
+            try:
+                engine.stop()
+            except:
+                pass
+            print("Speech forcibly stopped by button.")
+            stop_flag = False
+            # Return to listening for next wake word
         pcm = audio_stream.read(porcupine.frame_length, exception_on_overflow=False)
         import struct
         pcm_unpacked = struct.unpack_from("h" * porcupine.frame_length, pcm)
         keyword_index = porcupine.process(pcm_unpacked)
         if keyword_index >= 0:
             print("\n✅ Wake word detected! JARVIS is ready.")
-            speak("Hello, Creator.")
-            process_conversation()
+            if not muted:
+                speak("Hello, Creator.")
+                process_conversation()
+            else:
+                print("(Muted) ignoring conversation...")
 
 def process_conversation():
+    global stop_flag, muted
     while True:
+        if stop_flag:
+            try:
+                engine.stop()
+            except:
+                pass
+            print("Conversation forcibly stopped by button.")
+            stop_flag = False
+            return
         user_input = recognize_speech(30) or ""
         if user_input:
+            if stop_flag:
+                try:
+                    engine.stop()
+                except:
+                    pass
+                print("Conversation forcibly stopped by button.")
+                stop_flag = False
+                return
 
             # QUIT triggers
             if user_input in ["exit", "quit", "goodbye", "shut down"]:
@@ -392,147 +477,20 @@ def process_conversation():
                     speak("Shutdown cancelled.")
                 continue
 
-            # SEND EMAIL
-            if "send email" in user_input:
-                spelled_email = parse_email_in_one_utterance()
-                if not spelled_email:
-                    speak("No valid email address was provided. Cancelling.")
-                    continue
-                speak("What is the subject of your email?")
-                subject_line = recognize_speech(30) or "No Subject"
-
-                speak("What would you like the message to say? Take your time.")
-                body_content = recognize_speech(30) or ""
-
-                speak(f"You want me to send an email to {spelled_email}, subject {subject_line}, with content: {body_content}. Shall I send it now?")
-                confirm = recognize_speech(5) or ""
-                if is_affirmative(confirm):
-                    send_email_outlook(spelled_email, subject_line, body_content)
-                    speak("Email sent.")
-                else:
-                    speak("Email cancelled.")
+            # Environment Queries
+            if "temperature" in user_input or "temp" in user_input:
+                response = answer_temperature_query()
+                print(f"🤖 JARVIS: {response}")
+                speak(response)
                 continue
-
-            # REMINDERS
-            if any(phrase in user_input for phrase in ["remind me", "add reminder", "set reminder"]):
-                speak("What is your reminder about?")
-                task_name = recognize_speech(30) or "No Task Provided"
-
-                speak("When should I remind you? For example: 'tomorrow at 5 pm' or 'march 25 at 2 pm'.")
-                date_input = recognize_speech(30) or ""
-                parsed = parse_natural_datetime(date_input)
-                if not parsed:
-                    speak("I couldn't parse the date. Cancelling reminder.")
-                    continue
-
-                speak(f"Remind you '{task_name}' on {parsed}? Yes or no?")
-                c = recognize_speech(5) or ""
-                if is_affirmative(c):
-                    add_reminder(task_name, parsed)
-                    speak(f"Reminder set for {parsed}.")
-                else:
-                    speak("Reminder creation cancelled.")
-                continue
-
-            # CALENDAR EVENT
-            if any(phrase in user_input for phrase in ["calendar event", "add event", "create event", "schedule event"]):
-                speak("What is the name of your event?")
-                event_name = recognize_speech(30) or "Untitled Event"
-
-                speak("When does it start? For example: 'tomorrow at 2 pm' or 'March 29 at 10 am'")
-                start_user = recognize_speech(30) or ""
-                start_parsed = parse_natural_datetime(start_user)
-                if not start_parsed:
-                    speak("I couldn't parse the start date. Cancelling.")
-                    continue
-
-                speak("When does it end?")
-                end_user = recognize_speech(30) or ""
-                end_parsed = parse_natural_datetime(end_user)
-                if not end_parsed:
-                    speak("I couldn't parse the end date. Cancelling.")
-                    continue
-
-                speak(f"Create event '{event_name}' from {start_parsed} to {end_parsed}? Yes or no?")
-                c = recognize_speech(5) or ""
-                if is_affirmative(c):
-                    add_calendar_event(event_name, start_parsed, end_parsed)
-                    speak(f"Event '{event_name}' added from {start_parsed} to {end_parsed}.")
-                else:
-                    speak("Event creation cancelled.")
-                continue
-
-            # MESSAGES (SINGLE STEP)
-            # e.g. "message John" or "text 303-333-3333"
-            if any(x in user_input for x in ["message ", "send message to", "text "]):
-                phone = parse_contact_or_number(user_input)
-                if not phone:
-                    speak("Sorry, I couldn't parse the contact or phone number. Cancelling.")
-                    continue
-
-                speak_phone_number_digits(phone)
-                speak("Is this correct?")
-                c = recognize_speech(5) or ""
-                if not is_affirmative(c):
-                    speak("Message cancelled.")
-                    continue
-
-                speak("What is the message content?")
-                msg_body = recognize_speech(30) or ""
-                speak(f"You want to send '{msg_body}' to that number. Shall I send it now?")
-                c = recognize_speech(5) or ""
-                if is_affirmative(c):
-                    send_imessage(phone, msg_body)
-                    speak("Message sent.")
-                else:
-                    speak("Message cancelled.")
-                continue
-
-            # FACETIME (SINGLE STEP)
-            # e.g. "call John" or "facetime 303-333-3333"
-            if any(x in user_input for x in ["call ", "facetime "]):
-                phone = parse_contact_or_number(user_input)
-                if not phone:
-                    speak("Sorry, I couldn't parse the contact or phone number. Cancelling.")
-                    continue
-
-                speak_phone_number_digits(phone)
-                speak("Shall I start FaceTime call now?")
-                c = recognize_speech(5) or ""
-                if is_affirmative(c):
-                    facetime_call(phone)
-                    speak(f"Calling now...")
-                else:
-                    speak("Call cancelled.")
-                continue
-
-            # "open X in safari"
-            if "open" in user_input and "in safari" in user_input:
-                domain = user_input.replace("open", "").replace("in safari", "").strip()
-                if not domain.endswith(".com"):
-                    domain += ".com"
-                safari_url = f"https://{domain}"
-                subprocess.run(["open", "-a", "Safari", safari_url])
-                speak(f"Opening {domain}.")
-                continue
-
-            # "open X" => Mac app
-            if user_input.startswith("open "):
-                app_name = user_input.replace("open ", "").strip()
-                subprocess.run(["open", "-a", app_name])
-                speak(f"Opening {app_name}.")
-                continue
-
-            # "search X"
-            if user_input.startswith("search "):
-                search_query = user_input.replace("search ", "").strip()
-                google_url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}"
-                subprocess.run(["open", "-a", "Safari", google_url])
-                speak(f"Searching for {search_query}.")
+            if "humidity" in user_input:
+                response = answer_humidity_query()
+                print(f"🤖 JARVIS: {response}")
+                speak(response)
                 continue
 
             # Real-time search or GPT
-            if any(keyword in user_input for keyword in ["news", "update", "latest", "who", "what", "where", "how"]):
+            if any(keyword in user_input for keyword in ["news", "update", "latest", "who","what", "where", "how"]):
                 response = search_google(user_input)
             else:
                 response = chat_with_gpt(user_input)
@@ -554,7 +512,11 @@ def cleanup():
         print(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
-    print("🔊 Starting JARVIS with macOS Contacts integration for messages/calls, phone-digit reading, and dateparser.")
+    print("🔊 Starting JARVIS with macOS Contacts integration, hardware integration, and dateparser.")
+    # Start a background thread to watch hardware_data.json for button events
+    watch_thread = threading.Thread(target=watch_hardware_data, daemon=True)
+    watch_thread.start()
+
     try:
         detect_wake_word()
     except KeyboardInterrupt:
